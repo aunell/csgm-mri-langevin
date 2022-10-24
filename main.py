@@ -18,11 +18,18 @@ import multiprocessing
 import PIL.Image
 from torch.utils.data.distributed import DistributedSampler
 from utils import *
+import matplotlib.pyplot as plt
 
 from ncsnv2.models import get_sigmas
 from ncsnv2.models.ema import EMAHelper
 from ncsnv2.models.ncsnv2 import NCSNv2Deepest
 import argparse
+
+from skimage.metrics import structural_similarity
+import argparse
+import imutils
+import cv2 
+import cmath
 
 def normalize(gen_img, estimated_mvue):
     '''
@@ -70,6 +77,8 @@ class LangevinOptimizer(torch.nn.Module):
         self.index = 0
         self.experiment = experiment
         self.logger = logger
+        self.nrmse = []
+        self.ssim = []
 
     def _dict2namespace(self,langevin_config):
         namespace = argparse.Namespace()
@@ -98,27 +107,31 @@ class LangevinOptimizer(torch.nn.Module):
         x = torch_fft.ifftshift(x, dim=(-2, -1))
         return x
 
+
     def _sample(self, y):
+        nrmse=[]
+        ssim= []
         ref, mvue, maps, batch_mri_mask = y
         estimated_mvue = torch.tensor(
             get_mvue(ref.cpu().numpy(),
             maps.cpu().numpy()), device=ref.device)
         self.logger.info(f"Running {self.langevin_config.model.num_classes} steps of Langevin.")
-
         pbar = tqdm(range(self.langevin_config.model.num_classes), disable=(self.config['device'] != 0))
         pbar_labels = ['class', 'step_size', 'error', 'mean', 'max']
         step_lr = self.langevin_config.sampling.step_lr
         forward_operator = lambda x: MulticoilForwardMRI(self.config['orientation'])(torch.complex(x[:, 0], x[:, 1]), maps, batch_mri_mask)
 
 
-        samples = torch.rand(y[0].shape[0], self.langevin_config.data.channels,
+        samplesRanging = torch.rand(y[0].shape[0], self.langevin_config.data.channels,
                                  self.config['image_size'][0],
                                  self.config['image_size'][1], device=self.device)
+        samples=torch.view_as_real(estimated_mvue).permute(0, 3, 1,2).type(torch.cuda.FloatTensor)
 
+        samples= normalize(samples, samplesRanging)
         with torch.no_grad():
             for c in pbar:
-                if c <= self.config['start_iter']:
-                    continue
+#                 if c <= self.config['start_iter']:
+#                     continue
                 if c <= 1800:
                     n_steps_each = 3
                 else:
@@ -157,9 +170,17 @@ class LangevinOptimizer(torch.nn.Module):
                     if np.isnan((meas - ref).norm().cpu().numpy()):
                         return normalize(samples, estimated_mvue)
                 if self.config['save_images']:
-                    if (c+1) % self.config['save_iter'] ==0 :
+#                     if (c+1) % self.config['save_iter'] ==0 :
+                    if (c) % 100 ==0 :
                         img_gen = normalize(samples, estimated_mvue)
-                        to_display = torch.view_as_complex(img_gen.permute(0, 2, 3, 1).reshape(-1, self.config['image_size'][0], self.config['image_size'][1], 2).contiguous()).abs()
+#                         img_gen = normalize(samples, mvue)
+                        to_display = torch.view_as_complex(img_gen.permute(0, 2, 3, 1).reshape(-1, self.config['image_size'][0], self.config['image_size'][1], 2).contiguous()).abs()   
+                        #NEW CODE
+#                         img_genP = normalize(p_grad, estimated_mvue)
+                        to_displayP = torch.view_as_complex(p_grad.permute(0, 2, 3, 1).reshape(-1, self.config['image_size'][0], self.config['image_size'][1], 2).contiguous()).abs().type(torch.cuda.FloatTensor)   
+#                         img_genM = normalize(meas_grad, estimated_mvue)
+                        to_displayM = torch.view_as_complex(meas_grad.permute(0, 2, 3, 1).reshape(-1, self.config['image_size'][0], self.config['image_size'][1], 2).contiguous()).abs().type(torch.cuda.FloatTensor)
+                        ##
                         if self.config['anatomy'] == 'brain':
                             # flip vertically
                             to_display = to_display.flip(-2)
@@ -178,7 +199,68 @@ class LangevinOptimizer(torch.nn.Module):
                         for i, exp_name in enumerate(self.config['exp_names']):
                             if self.config['repeat'] == 1:
                                 file_name = f'{exp_name}_R={self.config["R"]}_{c}.jpg'
-                                save_images(to_display[i:i+1], file_name, normalize=True)
+                                title=f'{exp_name}_R={self.config["R"]}_{c}.jpg'
+                                imageReg=to_display[i:i+1][0].cpu().numpy()
+                                imageP=to_displayP[i:i+1][0].cpu().numpy()
+                                imageM=to_displayM[i:i+1][0].cpu().numpy()
+                                ##reconstruction error
+                                mvueConstructed = mvue.flip(-2)[i:i+1][0][0].cpu().numpy()
+                                (score, diff) = structural_similarity(imageReg, mvueConstructed, full=True)
+                                self.ssim.append(score)
+                                self.nrmse.append((np.sqrt(np.mean(np.square(mvueConstructed-imageReg)))/(mvueConstructed.max() - mvueConstructed.min())).real)
+                                print('NRMSE', self.nrmse)
+                                print('SSIM', self.ssim)
+                                # 3 x 2 gif of reconstruction by fourier
+                                fig, axs = plt.subplots(3,2)
+                                im=axs[0,0].imshow(imageReg)
+                                axs[0,0].set_title(f'Full Reconstruction_{c}')
+                                fig.colorbar(im, ax=axs[0,0])
+                                im=axs[1,0].imshow(imageP)
+                                axs[1,0].set_title(f'PGRAD_{c}')
+                                fig.colorbar(im, ax=axs[1,0])
+                                im=axs[2,0].imshow(imageM)
+                                axs[2,0].set_title(f'MGRAD_{c}')
+                                fig.colorbar(im, ax=axs[2,0])
+                                
+                                
+                                to_display = self._fft(to_display).real  
+                                imageReg=to_display[i:i+1][0].cpu().numpy()
+                                to_displayP = self._fft(to_displayP).real  
+                                imageP=to_displayP[i:i+1][0].cpu().numpy()
+                                to_displayM = self._fft(to_displayM).real  
+                                imageM=to_displayM[i:i+1][0].cpu().numpy()
+                                im=axs[0,1].imshow(np.log(np.abs(imageReg)+1e-8),cmap='gray')
+                                axs[0,1].set_title(f'Fourier Full_{c}')
+                                fig.colorbar(im, ax=axs[0,1])
+                                im=axs[1,1].imshow(np.log(np.abs(imageP)+1e-8),cmap='gray')
+                                axs[1,1].set_title(f'Fourier PGRAD_{c}')
+                                fig.colorbar(im, ax=axs[1,1])
+                                im=axs[2,1].imshow(np.log(np.abs(imageM)+1e-8),cmap='gray')
+                                axs[2,1].set_title(f'Fourier MGRAD_{c}')
+                                fig.colorbar(im, ax=axs[2,1])
+                                fig.tight_layout()
+                                fig.savefig(title)
+## GIF CODE ENDS HERE, start difference plots
+#                                 fig, axs = plt.subplots(2,2)
+#                                 im=axs[0,0].imshow(np.abs(imageReg-mvueConstructed))
+#                                 axs[0,0].set_title(f'Reconstruction Error_{c}')
+#                                 fig.colorbar(im, ax=axs[0,0])
+                                
+#                                 im=axs[0,1].imshow(np.abs(mvueConstructed))
+#                                 axs[0,1].set_title(f'Reference_{c}')
+#                                 fig.colorbar(im, ax=axs[0,1])
+                                
+#                                 im=axs[1,1].imshow(np.abs(imageReg))
+#                                 axs[1,1].set_title(f'Reconstruction Image_{c}')
+#                                 fig.colorbar(im, ax=axs[1,1])
+                                
+#                                 im=axs[1,0].imshow(np.abs(imageP-imageM))
+#                                 axs[1,0].set_title(f'PGrad-MGrad_{c}')
+#                                 fig.colorbar(im, ax=axs[1,0])
+#                                 fig.tight_layout()
+#                                 fig.savefig(f'{exp_name}_R={self.config["R"]}_{c}.jpg')
+#                                 save_images(to_display[i:i+1], file_name, normalize=True)
+                                #
                                 if self.experiment is not None:
                                     self.experiment.log_image(file_name)
                             else:
@@ -194,7 +276,15 @@ class LangevinOptimizer(torch.nn.Module):
                         # self.gen_outs.append(intermediate_out)
                 # if c>=0:
                 #     break
+#         x=np.arange(24)
+#         fig, axs = plt.subplots(2)
+#         im=axs[0].plot(x,nrmse)
+#         axs[0].set_title("RMSE")
 
+#         im=axs[1].plot(x, ssim)
+#         axs[1].set_title("SSIM")
+#         fig.tight_layout()
+#         fig.savefig("Similarity.jpg")
         return normalize(samples, estimated_mvue)
 
 

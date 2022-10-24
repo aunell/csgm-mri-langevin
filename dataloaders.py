@@ -175,6 +175,7 @@ class MVU_Estimator_Brain(Dataset):
                   'scan_idx': scan_idx,
                   'slice_idx': slice_idx,
                   'mvue_file': mvue_file}
+
         return sample
 
 class MVU_Estimator_Knees(Dataset):
