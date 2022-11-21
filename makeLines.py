@@ -9,15 +9,15 @@ import matplotlib.pyplot as plt
 
 #nrmse R=4 = 0.009994695
 #nrmse R=12 = 
-def makeComparisons(nrmse, samples, p, m, noise, step, appendVal):
+def makeComparisons(nrmse, samples, p, m, noise, step, appendVal, length):
     nrmse.insert(0, appendVal)
-    x=np.arange(24)
+    x=np.arange(length)
     fig, axs = plt.subplots(3,2)
 
-    im=axs[0,0].plot(np.arange(25),nrmse)
+    im=axs[0,0].plot(np.arange(length+1),nrmse)
     axs[0,0].set_title("NRMSE")
 
-    im=axs[1,0].plot(np.arange(25), samples)
+    im=axs[1,0].plot(np.arange(length+1), samples)
     axs[1,0].set_title('Samples')
 
     im=axs[2,0].plot(x, p)
@@ -31,8 +31,8 @@ def makeComparisons(nrmse, samples, p, m, noise, step, appendVal):
 
     im=axs[2,1].plot(x, step)
     axs[2,1].set_title('Step Size')
+    fig.suptitle('noise init, start at c=2200 , R=4')
     fig.tight_layout()
-    fig.suptitle('With Better Initialization, R=4')
     fig.savefig('Scaling.jpg')
 
 # makeComparisons(nrmse, samples, p, m, noise, step)
