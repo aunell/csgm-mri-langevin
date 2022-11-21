@@ -56,6 +56,7 @@ def normalize_0_to_1(image):
     image_02perc = np.percentile(image, 2)
     image_98perc = np.percentile(image, 98)
     image_normalized = (image - image_02perc) / (image_98perc - image_02perc)
+    image_normalized=np.clip(image_normalized, 0, 1)
     return image_normalized
 
 def compute_rmse(a, b):
@@ -134,9 +135,8 @@ class LangevinOptimizer(torch.nn.Module):
         to_displayInit = torch.view_as_complex(samplesInit.permute(0, 2, 3, 1).reshape(-1, self.config['image_size'][0], self.config['image_size'][1], 2).contiguous()).abs()  
         imageInit = to_displayInit[0:1][0].cpu().numpy()
         mvueConstructed = torch.view_as_real(mvue)[0:1].permute(0,1,4,2,3)[0][0][1].flip(-2).cpu().numpy()
-#         mvueMax=np.amax(mvueConstructed)
-        mvueConstructed= np.absolute(mvueConstructed)
-        mvueConstructed=normalize_0_to_1(mvueConstructed)
+        #mvueConstructed is returned as inverted high quality mvue, need to do this abs and subtract 1 to invert back
+        mvueConstructed=np.abs(normalize_0_to_1(mvueConstructed)-1) 
         imageInit=normalize_0_to_1(imageInit)
         nrmseInit = compute_rmse(imageInit, mvueConstructed)
         return nrmseInit, mvueConstructed
@@ -261,14 +261,15 @@ class LangevinOptimizer(torch.nn.Module):
                                 ##reconstruction error
                                 imageReg=normalize_0_to_1(imageReg)
                                 (scored, ssimim) = structural_similarity(imageReg, mvueConstructed, full=True)
-                                self.ssim.append(scored)
+                                self.ssim.append(scored)   
                                 self.nrmse.append(compute_rmse(imageReg, mvueConstructed))
                                 print('NRMSE', self.nrmse)
                                 if self.nrmse[-1]<nrmseStart:
                                     print('EPOCH NUMBER TO START', len(self.nrmse))
                                 print('SSIM', self.ssim)
                                 file_name = f'{exp_name}_R={self.config["R"]}_sample={i}_{c}.jpg'
-                                save_images(to_display[0:1], file_name, normalize=True)
+                                # save_images(to_display[0:1], file_name, normalize=True)
+                                save_images(torch.tensor(ssimim, device=self.device), file_name, normalize=True)
                                 if self.experiment is not None:
                                     self.experiment.log_image(file_name)
                             else:
