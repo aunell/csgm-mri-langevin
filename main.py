@@ -14,7 +14,7 @@ import random
 import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 from dataloaders import MVU_Estimator_Brain, MVU_Estimator_Knees, MVU_Estimator_Stanford_Knees, MVU_Estimator_Abdomen
-from makeLines import makeComparisons
+from makeLines import makeComparisons, visualize
 import multiprocessing
 import PIL.Image
 from torch.utils.data.distributed import DistributedSampler
@@ -135,13 +135,14 @@ class LangevinOptimizer(torch.nn.Module):
         to_displayInit = torch.view_as_complex(samplesInit.permute(0, 2, 3, 1).reshape(-1, self.config['image_size'][0], self.config['image_size'][1], 2).contiguous()).abs()  
         imageInit = to_displayInit[0:1][0].cpu().numpy()
         mvueConstructed = torch.view_as_real(mvue)[0:1].permute(0,1,4,2,3)[0][0][1].flip(-2).cpu().numpy()
-        #mvueConstructed is returned as inverted high quality mvue, need to do this abs and subtract 1 to invert back
+        #mvueConstructed is returned as inverted high quality mvue for brain2, need to do this abs and subtract 1 to invert back
         mvueConstructed=np.abs(normalize_0_to_1(mvueConstructed)-1) 
+        # mvueConstructed=np.abs(normalize_0_to_1(mvueConstructed)) 
         imageInit=normalize_0_to_1(imageInit)
         nrmseInit = compute_rmse(imageInit, mvueConstructed)
         return nrmseInit, mvueConstructed
    
-    def _sample(self, y):
+    def _sample(self, y, sliceNum):
         ref, mvue, maps, batch_mri_mask = y
         estimated_mvue = torch.tensor(
             get_mvue(ref.cpu().numpy(),
@@ -153,31 +154,37 @@ class LangevinOptimizer(torch.nn.Module):
         forward_operator = lambda x: MulticoilForwardMRI(self.config['orientation'])(torch.complex(x[:, 0], x[:, 1]), maps, batch_mri_mask)
 
 
+        samplesRanging = torch.rand(y[0].shape[0], self.langevin_config.data.channels,
+                                 self.config['image_size'][0],
+                                 self.config['image_size'][1], device=self.device)
+        # samples=torch.view_as_real(estimated_mvue).permute(0, 3, 1,2).type(torch.cuda.FloatTensor)
         samples = torch.rand(y[0].shape[0], self.langevin_config.data.channels,
                                  self.config['image_size'][0],
                                  self.config['image_size'][1], device=self.device)
-#         samples=torch.view_as_real(estimated_mvue).permute(0, 3, 1,2).type(torch.cuda.FloatTensor)
-
-#         samples= normalize(samples, samplesRanging)
-#         normSamp = normalize_0_to_1(samples.cpu().numpy())
-#         samples= torch.tensor(normSamp, device=self.device)
+        normSamp = normalize_0_to_1(samples.cpu().numpy())
+        samples= torch.tensor(normSamp, device=self.device)
 #         print('torch max', torch.max(samples).item())
 #         print('normSamp', max(normSamp))
         self.samples.append(torch.max(samples).item())
         nrmseStart, mvueConstructed = self.rmseInit(samples, estimated_mvue, mvue)
-        nrmseRandom, _ = self.rmseInit(samples, estimated_mvue, mvue)
+        nrmseRandom, _ = self.rmseInit(samplesRanging, estimated_mvue, mvue)
+        print('start', nrmseStart)
         #pgrad initializer
         #
-        #c = int(self.langevin_config.model.num_classes*(1-nrmseStart/nrmseRandom))
-#         labels = torch.ones(samples.shape[0], device=samples.device) * c
-#         labels = labels.long()
-#         p_grad = self.score(samples, labels)
-#         meanNoise = round(np.log(torch.max(torch.abs(p_grad)).item()), 4)
-#         lengthSigmas= np.array(self.sigmas).shape[0]
-#         sigmasReversed= np.array(self.sigmas)[::-1]
-#         epoch=np.searchsorted(sigmasReversed, meanNoise)
-#         epochStart = lengthSigmas-epoch
-        pbar = tqdm(range(2300, self.langevin_config.model.num_classes), disable=(self.config['device'] != 0))
+        # c = int(self.langevin_config.model.num_classes*(1-nrmseStart/nrmseRandom))
+        # print('C is', c)
+        # labels = torch.ones(samples.shape[0], device=samples.device) * c
+        # labels = labels.long()
+        # p_grad = self.score(samples, labels)
+        # meanNoise = round(np.log(torch.max(torch.abs(p_grad)).item()), 4)
+        # print('MN', meanNoise)
+        # lengthSigmas= np.array(self.sigmas).shape[0]
+        # sigmasReversed= np.array(self.sigmas)[::-1]
+        # epoch=np.searchsorted(sigmasReversed, meanNoise)
+        # epochStart = lengthSigmas-epoch
+        epochStart=2305
+        
+        pbar = tqdm(range(epochStart, self.langevin_config.model.num_classes), disable=(self.config['device'] != 0))
         
         with torch.no_grad():
             for c in pbar:
@@ -224,7 +231,7 @@ class LangevinOptimizer(torch.nn.Module):
                         return normalize(samples, estimated_mvue)
                 if self.config['save_images']:
 #                     if (c+1) % self.config['save_iter'] ==0 :
-                    if (c) % 1 ==0 :
+                    # if (c) % 100 ==0 :
                         img_gen = normalize(samples, estimated_mvue)
                         to_display = torch.view_as_complex(img_gen.permute(0, 2, 3, 1).reshape(-1, self.config['image_size'][0], self.config['image_size'][1], 2).contiguous()).abs()   
                         #NEW CODE
@@ -240,9 +247,10 @@ class LangevinOptimizer(torch.nn.Module):
                             # flip vertically
                             to_display = to_display.flip(-2)
                         elif self.config['anatomy'] == 'knees':
-                            # flip vertically and horizontally
+                            # # flip vertically and horizontally
+                            # print('FLIPPING')
                             to_display = to_display.flip(-2)
-                            to_display = to_display.flip(-1)
+                            # to_display = to_display.flip(-1)
                         elif self.config['anatomy'] == 'stanford_knees':
                             # do nothing
                             pass
@@ -268,8 +276,13 @@ class LangevinOptimizer(torch.nn.Module):
                                     print('EPOCH NUMBER TO START', len(self.nrmse))
                                 print('SSIM', self.ssim)
                                 file_name = f'{exp_name}_R={self.config["R"]}_sample={i}_{c}.jpg'
-                                # save_images(to_display[0:1], file_name, normalize=True)
-                                save_images(torch.tensor(ssimim, device=self.device), file_name, normalize=True)
+                                save_images(to_display[0:1], "finalReconstruction.jpg", normalize=True)
+                                # save_images(torch.tensor(ssimim, device=self.device), 'ssimim.jpg', normalize=True)
+                                # save_images(torch.tensor(mvueConstructed, device=self.device), f'{exp_name}_R=mvue.jpg', normalize=True)
+                                
+                                visualize(imageReg, mvueConstructed, imageReg-mvueConstructed, ssimim, self.nrmse, self.ssim, epochStart, sliceNum)
+
+
                                 if self.experiment is not None:
                                     self.experiment.log_image(file_name)
                             else:
@@ -291,15 +304,27 @@ class LangevinOptimizer(torch.nn.Module):
         print('m', self.m)
         print('step', self.step)
         print('noise', self.noise)
+        print('nrmseStart', nrmseStart)
         length= len(self.nrmse)
+        print('length', length)
+        print(self.ssim[-1])
+        
+        print('🔴 making comp')
         makeComparisons(self.nrmse, self.samples, self.p, self.m, self.noise, self.step, nrmseStart, length)
+        self.nrmse=[]
+        self.samples=[]
+        self.p=[]
+        self.m=[]
+        self.step=[]
+        self.noise=[]
+        self.ssim=[]
+        return normalize(samples, estimated_mvue)
 
 
-
-    def sample(self, y):
+    def sample(self, y, sliceNum):
         print('HERE sampling performed:')
         self._initialize()
-        mvue = self._sample(y)
+        mvue = self._sample(y, sliceNum)
 
         outputs = []
         for i in range(y[0].shape[0]):
@@ -407,6 +432,8 @@ def mp_run(rank, config, project_dir, working_dir, files):
                     maps: sensitivity maps for each one of the coils
                     mask: binary valued kspace mask
         '''
+        if index==0 or index%3!=0 or index>15:
+            continue
         ref, mvue, maps, mask = sample['ground_truth'], sample['mvue'], sample['maps'], sample['mask']
         # uncomment for meniscus tears
         # exp_name = sample['mvue_file'][0].split('/')[-1] + '|langevin|' + f'slide_idx_{sample["slice_idx"][0].item()}'
@@ -426,7 +453,6 @@ def mp_run(rank, config, project_dir, working_dir, files):
 
         exp_names = []
         for batch_idx in range(config['batch_size']):
-
             exp_name = sample['mvue_file'][batch_idx].split('/')[-1] + '|langevin|' + f'slide_idx_{sample["slice_idx"][batch_idx].item()}'
             exp_names.append(exp_name)
             print(exp_name)
@@ -445,7 +471,7 @@ def mp_run(rank, config, project_dir, working_dir, files):
         if config['repeat'] > 1:
             repeat = config['repeat']
             ref, mvue, maps, mask, estimated_mvue = ref.repeat(repeat,1,1,1), mvue.repeat(repeat,1,1,1), maps.repeat(repeat,1,1,1), mask.repeat(repeat,1), estimated_mvue.repeat(repeat,1,1,1)
-        outputs = langevin_optimizer.sample((ref, mvue, maps, mask)) #gets called once 
+        outputs = langevin_optimizer.sample((ref, mvue, maps, mask), index) #gets called once 
 
 
         for i, exp_name in enumerate(exp_names):
@@ -456,8 +482,8 @@ def mp_run(rank, config, project_dir, working_dir, files):
                     torch.save(outputs[j], f'{exp_name}_R={config["R"]}_sample={j}_outputs.pt')
 
         # todo: delete after testing
-        if index >= 0:
-            break
+        # if index >= 0:
+        #     break
 
     if config['multiprocessing']:
         mp_cleanup()
