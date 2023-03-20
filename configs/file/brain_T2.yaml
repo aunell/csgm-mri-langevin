@@ -6,7 +6,7 @@ batch_size: 1
 repeat: 1
 
 # The pre-trained NCSNV2 checkpoint
-gen_ckpt: ncsnv2/exp/logs/mri/checkpoint_40000.pth #ncsnv2-mri-mvue/logs/mri-mvue/checkpoint_100000.pth
+gen_ckpt: ncsnv2-mri-mvue/logs/mri-mvue/checkpoint_100000.pth #ncsnv2/exp/logs/mri/checkpoint_40000.pth
 
 ## weights of different losses
 mse: 5.

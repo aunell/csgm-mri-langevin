@@ -147,6 +147,7 @@ class LangevinOptimizer(torch.nn.Module):
         estimated_mvue = torch.tensor(
             get_mvue(ref.cpu().numpy(),
             maps.cpu().numpy()), device=ref.device)
+        print('estimated mvue size', estimated_mvue.size())
         self.logger.info(f"Running {self.langevin_config.model.num_classes} steps of Langevin.")
 #         pbar = tqdm(range(self.langevin_config.model.num_classes), disable=(self.config['device'] != 0))
         pbar_labels = ['class', 'step_size', 'error', 'mean', 'max']
@@ -182,9 +183,9 @@ class LangevinOptimizer(torch.nn.Module):
         # sigmasReversed= np.array(self.sigmas)[::-1]
         # epoch=np.searchsorted(sigmasReversed, meanNoise)
         # epochStart = lengthSigmas-epoch
-        epochStart=2305
+        epochStart=0
         
-        pbar = tqdm(range(epochStart, self.langevin_config.model.num_classes), disable=(self.config['device'] != 0))
+        pbar = tqdm(range(0, self.langevin_config.model.num_classes), disable=(self.config['device'] != 0))
         
         with torch.no_grad():
             for c in pbar:
@@ -325,6 +326,7 @@ class LangevinOptimizer(torch.nn.Module):
         print('HERE sampling performed:')
         self._initialize()
         mvue = self._sample(y, sliceNum)
+        print('size of mvue', mvue.size())
 
         outputs = []
         for i in range(y[0].shape[0]):
@@ -435,6 +437,8 @@ def mp_run(rank, config, project_dir, working_dir, files):
         if index==0 or index%3!=0 or index>15:
             continue
         ref, mvue, maps, mask = sample['ground_truth'], sample['mvue'], sample['maps'], sample['mask']
+        print('size of mvue A', mvue.size())
+        print('size of ref A', ref.size())
         # uncomment for meniscus tears
         # exp_name = sample['mvue_file'][0].split('/')[-1] + '|langevin|' + f'slide_idx_{sample["slice_idx"][0].item()}'
         # # if exp_name != 'file1000425.h5|langevin|slide_idx_22':
