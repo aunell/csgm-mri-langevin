@@ -2,6 +2,7 @@ from comet_ml import OfflineExperiment, Experiment
 import torchvision
 import numpy as np
 import math
+import torch.distributed as dist
 import torch
 from torch import optim
 from tqdm import tqdm
@@ -82,14 +83,20 @@ class LangevinOptimizer(torch.nn.Module):
         states = torch.load(os.path.join(project_dir, config['gen_ckpt']))#, map_location=self.device) #loading pretrained score
 
         self.score = torch.nn.DataParallel(self.score)
-
-        self.score.load_state_dict(states[0], strict=True) #assigning pretrained score to score function
+        statesDistributed = states['model_state']
+        new_state_dict={}
+        for k, v in statesDistributed.items():
+            name = 'module.'+k  # remove 'module.' from the key
+            new_state_dict[name] = v
+        # self.score.load_state_dict(states['model_state'], strict=True) #assigning pretrained score to score function
+        self.score.load_state_dict(new_state_dict, strict=True)
         if self.langevin_config.model.ema:
-            ema_helper = EMAHelper(mu=self.langevin_config.model.ema_rate)
-            ema_helper.register(self.score)
-            ema_helper.load_state_dict(states[-1])
-            ema_helper.ema(self.score)
-        del states
+            pass
+            # ema_helper = EMAHelper(mu=self.langevin_config.model.ema_rate)
+            # ema_helper.register(self.score)
+            # # ema_helper.load_state_dict(states[-1])
+            # ema_helper.ema(self.score)
+        del new_state_dict
 
         self.index = 0
         self.experiment = experiment
@@ -136,8 +143,8 @@ class LangevinOptimizer(torch.nn.Module):
         imageInit = to_displayInit[0:1][0].cpu().numpy()
         mvueConstructed = torch.view_as_real(mvue)[0:1].permute(0,1,4,2,3)[0][0][1].flip(-2).cpu().numpy()
         #mvueConstructed is returned as inverted high quality mvue for brain2, need to do this abs and subtract 1 to invert back
-        mvueConstructed=np.abs(normalize_0_to_1(mvueConstructed)-1) 
-        # mvueConstructed=np.abs(normalize_0_to_1(mvueConstructed)) 
+        # mvueConstructed=np.abs(normalize_0_to_1(mvueConstructed)-1) 
+        mvueConstructed=np.abs(normalize_0_to_1(mvueConstructed)) 
         imageInit=normalize_0_to_1(imageInit)
         nrmseInit = compute_rmse(imageInit, mvueConstructed)
         return nrmseInit, mvueConstructed
@@ -147,7 +154,6 @@ class LangevinOptimizer(torch.nn.Module):
         estimated_mvue = torch.tensor(
             get_mvue(ref.cpu().numpy(),
             maps.cpu().numpy()), device=ref.device)
-        print('estimated mvue size', estimated_mvue.size())
         self.logger.info(f"Running {self.langevin_config.model.num_classes} steps of Langevin.")
 #         pbar = tqdm(range(self.langevin_config.model.num_classes), disable=(self.config['device'] != 0))
         pbar_labels = ['class', 'step_size', 'error', 'mean', 'max']
@@ -164,25 +170,9 @@ class LangevinOptimizer(torch.nn.Module):
                                  self.config['image_size'][1], device=self.device)
         normSamp = normalize_0_to_1(samples.cpu().numpy())
         samples= torch.tensor(normSamp, device=self.device)
-#         print('torch max', torch.max(samples).item())
-#         print('normSamp', max(normSamp))
         self.samples.append(torch.max(samples).item())
         nrmseStart, mvueConstructed = self.rmseInit(samples, estimated_mvue, mvue)
         nrmseRandom, _ = self.rmseInit(samplesRanging, estimated_mvue, mvue)
-        print('start', nrmseStart)
-        #pgrad initializer
-        #
-        # c = int(self.langevin_config.model.num_classes*(1-nrmseStart/nrmseRandom))
-        # print('C is', c)
-        # labels = torch.ones(samples.shape[0], device=samples.device) * c
-        # labels = labels.long()
-        # p_grad = self.score(samples, labels)
-        # meanNoise = round(np.log(torch.max(torch.abs(p_grad)).item()), 4)
-        # print('MN', meanNoise)
-        # lengthSigmas= np.array(self.sigmas).shape[0]
-        # sigmasReversed= np.array(self.sigmas)[::-1]
-        # epoch=np.searchsorted(sigmasReversed, meanNoise)
-        # epochStart = lengthSigmas-epoch
         epochStart=0
         
         pbar = tqdm(range(0, self.langevin_config.model.num_classes), disable=(self.config['device'] != 0))
@@ -272,10 +262,7 @@ class LangevinOptimizer(torch.nn.Module):
                                 (scored, ssimim) = structural_similarity(imageReg, mvueConstructed, full=True)
                                 self.ssim.append(scored)   
                                 self.nrmse.append(compute_rmse(imageReg, mvueConstructed))
-                                print('NRMSE', self.nrmse)
-                                if self.nrmse[-1]<nrmseStart:
-                                    print('EPOCH NUMBER TO START', len(self.nrmse))
-                                print('SSIM', self.ssim)
+                                # print('NRMSE', self.nrmse)
                                 file_name = f'{exp_name}_R={self.config["R"]}_sample={i}_{c}.jpg'
                                 save_images(to_display[0:1], "finalReconstruction.jpg", normalize=True)
                                 # save_images(torch.tensor(ssimim, device=self.device), 'ssimim.jpg', normalize=True)
@@ -300,18 +287,18 @@ class LangevinOptimizer(torch.nn.Module):
                 # if c>=0:
                 #     break
         print('NRMSE', self.nrmse)
-        print('samples', self.samples)
-        print('p', self.p)
-        print('m', self.m)
-        print('step', self.step)
-        print('noise', self.noise)
-        print('nrmseStart', nrmseStart)
-        length= len(self.nrmse)
-        print('length', length)
-        print(self.ssim[-1])
+        # print('samples', self.samples)
+        # print('p', self.p)
+        # print('m', self.m)
+        # print('step', self.step)
+        # print('noise', self.noise)
+        # print('nrmseStart', nrmseStart)
+        # length= len(self.nrmse)
+        # print('length', length)
+        # print(self.ssim[-1])
         
-        print('🔴 making comp')
-        makeComparisons(self.nrmse, self.samples, self.p, self.m, self.noise, self.step, nrmseStart, length)
+        # print('🔴 making comp')
+        # makeComparisons(self.nrmse, self.samples, self.p, self.m, self.noise, self.step, nrmseStart, length)
         self.nrmse=[]
         self.samples=[]
         self.p=[]
@@ -357,14 +344,15 @@ def mp_run(rank, config, project_dir, working_dir, files):
         #experiment = Experiment(api_key,
         #                        project_name=project_name,
         #                        auto_output_logging='simple')
-        project_name = config['anatomy']
-        experiment = OfflineExperiment(
-                                project_name=project_name,
-                                auto_output_logging='simple',
-                                offline_directory="./outputs")
+        # project_name = config['anatomy']
+        # experiment = OfflineExperiment(
+        #                         project_name=project_name,
+        #                         auto_output_logging='simple',
+        #                         offline_directory="./outputs")
 
-        experiment.log_parameters(config)
-        pretty(config)
+        # experiment.log_parameters(config)
+        # pretty(config)
+        experiment= None
     else:
         experiment = None
 
@@ -434,11 +422,9 @@ def mp_run(rank, config, project_dir, working_dir, files):
                     maps: sensitivity maps for each one of the coils
                     mask: binary valued kspace mask
         '''
-        if index==0 or index%3!=0 or index>15:
+        if index<len(loader)//2:
             continue
         ref, mvue, maps, mask = sample['ground_truth'], sample['mvue'], sample['maps'], sample['mask']
-        print('size of mvue A', mvue.size())
-        print('size of ref A', ref.size())
         # uncomment for meniscus tears
         # exp_name = sample['mvue_file'][0].split('/')[-1] + '|langevin|' + f'slide_idx_{sample["slice_idx"][0].item()}'
         # # if exp_name != 'file1000425.h5|langevin|slide_idx_22':
@@ -459,7 +445,6 @@ def mp_run(rank, config, project_dir, working_dir, files):
         for batch_idx in range(config['batch_size']):
             exp_name = sample['mvue_file'][batch_idx].split('/')[-1] + '|langevin|' + f'slide_idx_{sample["slice_idx"][batch_idx].item()}'
             exp_names.append(exp_name)
-            print(exp_name)
             if config['save_images']:
                 file_name = f'{exp_name}_R={config["R"]}_estimated_mvue.jpg'
                 save_images(estimated_mvue[batch_idx:batch_idx+1].abs().flip(-2), file_name, normalize=True)
