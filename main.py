@@ -15,7 +15,7 @@ import random
 import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 from dataloaders import MVU_Estimator_Brain, MVU_Estimator_Knees, MVU_Estimator_Stanford_Knees, MVU_Estimator_Abdomen
-from makeLines import makeComparisons, visualize
+from makeLines import *
 import multiprocessing
 import PIL.Image
 from torch.utils.data.distributed import DistributedSampler
@@ -83,20 +83,23 @@ class LangevinOptimizer(torch.nn.Module):
         states = torch.load(os.path.join(project_dir, config['gen_ckpt']))#, map_location=self.device) #loading pretrained score
 
         self.score = torch.nn.DataParallel(self.score)
-        statesDistributed = states['model_state']
-        new_state_dict={}
-        for k, v in statesDistributed.items():
-            name = 'module.'+k  # remove 'module.' from the key
-            new_state_dict[name] = v
-        # self.score.load_state_dict(states['model_state'], strict=True) #assigning pretrained score to score function
-        self.score.load_state_dict(new_state_dict, strict=True)
+
+        if config['score_function_local']:   
+            statesDistributed = states['model_state']
+            new_state_dict={}
+            for k, v in statesDistributed.items():
+                name = 'module.'+k  # remove 'module.' from the key
+                new_state_dict[name] = v
+            self.score.load_state_dict(new_state_dict, strict=True)
+            del new_state_dict
+        else:
+            self.score.load_state_dict(states[0], strict=True)
         if self.langevin_config.model.ema:
             pass
             # ema_helper = EMAHelper(mu=self.langevin_config.model.ema_rate)
             # ema_helper.register(self.score)
             # # ema_helper.load_state_dict(states[-1])
             # ema_helper.ema(self.score)
-        del new_state_dict
 
         self.index = 0
         self.experiment = experiment
@@ -175,7 +178,7 @@ class LangevinOptimizer(torch.nn.Module):
         nrmseRandom, _ = self.rmseInit(samplesRanging, estimated_mvue, mvue)
         epochStart=0
         
-        pbar = tqdm(range(0, self.langevin_config.model.num_classes), disable=(self.config['device'] != 0))
+        pbar = tqdm(range(epochStart, self.langevin_config.model.num_classes), disable=(self.config['device'] != 0))
         
         with torch.no_grad():
             for c in pbar:
@@ -227,11 +230,11 @@ class LangevinOptimizer(torch.nn.Module):
                         to_display = torch.view_as_complex(img_gen.permute(0, 2, 3, 1).reshape(-1, self.config['image_size'][0], self.config['image_size'][1], 2).contiguous()).abs()   
                         #NEW CODE
                         to_displayP = torch.view_as_complex(p_grad.permute(0, 2, 3, 1).reshape(-1, self.config['image_size'][0], self.config['image_size'][1], 2).contiguous()).abs().type(torch.cuda.FloatTensor)   
-                        to_displayM = torch.view_as_complex(meas_grad.permute(0, 2, 3, 1).reshape(-1, self.config['image_size'][0], self.config['image_size'][1], 2).contiguous()).abs().type(torch.cuda.FloatTensor)
+                        # to_displayM = torch.view_as_complex(meas_grad.permute(0, 2, 3, 1).reshape(-1, self.config['image_size'][0], self.config['image_size'][1], 2).contiguous()).abs().type(torch.cuda.FloatTensor)
                         ##
                         self.samples.append(torch.max(samples).item())
                         self.p.append(torch.max(p_grad).item())
-                        self.m.append(torch.max(meas_grad).item())
+                        # self.m.append(torch.max(meas_grad).item())
                         self.step.append(step_size.item())
                         self.noise.append(torch.max(noise).item())
                         if self.config['anatomy'] == 'brain':
@@ -256,7 +259,7 @@ class LangevinOptimizer(torch.nn.Module):
                                 title=f'{exp_name}_R={self.config["R"]}_{c}.jpg'
                                 imageReg=to_display[i:i+1][0].cpu().numpy()
                                 imageP=to_displayP[i:i+1][0].cpu().numpy()
-                                imageM=to_displayM[i:i+1][0].cpu().numpy()
+                                # imageM=to_displayM[i:i+1][0].cpu().numpy()
                                 ##reconstruction error
                                 imageReg=normalize_0_to_1(imageReg)
                                 (scored, ssimim) = structural_similarity(imageReg, mvueConstructed, full=True)
@@ -269,7 +272,14 @@ class LangevinOptimizer(torch.nn.Module):
                                 # save_images(torch.tensor(mvueConstructed, device=self.device), f'{exp_name}_R=mvue.jpg', normalize=True)
                                 
                                 visualize(imageReg, mvueConstructed, imageReg-mvueConstructed, ssimim, self.nrmse, self.ssim, epochStart, sliceNum)
-
+                                if True:
+                                    #perform sampling
+                                    path = '/data/vision/polina/users/aunell/mri-langevin/csgm-mri-langevin/compare'
+                                    if not os.path.exists(path):
+                                        os.makedirs(path)
+                                    path=path+'/'
+                                    visualizeArray(np.abs(mvueConstructed), path, str(i)+'original.png')
+                                    visualizeArray(np.abs(imageReg), path, str(i)+'denoised.png')
 
                                 if self.experiment is not None:
                                     self.experiment.log_image(file_name)
